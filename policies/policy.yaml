@@ -1,0 +1,15 @@
+default_profile: student
+profiles:
+  student:
+    default_action: mask
+    actions:
+      EMAIL: mask
+      PHONE: redact
+      CREDIT_CARD: block
+      API_KEY: block
+  developer:
+    default_action: allow
+    actions:
+      EMAIL: tokenize
+      PHONE: tokenize
+      API_KEY: block
