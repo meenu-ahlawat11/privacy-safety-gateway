@@ -10,8 +10,12 @@ from pydantic import BaseModel, Field
 from app.audit import AuditLog
 from app.detectors.injection import InjectionScanner
 from app.llm_client import LLMClient, LLMError, get_client
-from app.pipeline import Pipeline
+from app.pipeline import Pipeline, PipelineResult
 from app.policy import PolicyError
+from app.protect import protect
+from app.vault import Vault
+
+_VALID_OVERRIDE_ACTIONS = {"allow", "mask", "redact", "tokenize"}
 
 app = FastAPI(title="Privacy & Safety Gateway")
 
@@ -61,6 +65,7 @@ class AnalyzeRequest(BaseModel):
 class ChatRequest(BaseModel):
     prompt: str = Field(min_length=1)
     profile: str | None = None
+    overrides: dict[str, str] | None = None
 
 
 # ---------- endpoints ----------
@@ -129,7 +134,12 @@ def chat(
 
     injection = scanner.scan(req.prompt)
 
-    def _audit(decision: str, counts: dict[str, int], acts: dict[str, str]) -> None:
+    def _audit(
+        decision: str,
+        counts: dict[str, int],
+        acts: dict[str, str],
+        override_count: int = 0,
+    ) -> None:
         audit_log.record(
             profile=req.profile or pipeline._policy._default_profile or "",
             finding_counts=counts,
@@ -137,8 +147,16 @@ def chat(
             injection_score=injection.score,
             injection_verdict=injection.verdict,
             decision=decision,
+            overrides=override_count,
             prompt_length=len(req.prompt),
         )
+
+    overrides = req.overrides or {}
+    for action in overrides.values():
+        if action == "block":
+            raise HTTPException(status_code=422, detail="block cannot be used as an override")
+        if action not in _VALID_OVERRIDE_ACTIONS:
+            raise HTTPException(status_code=422, detail="invalid override action")
 
     if injection.verdict == "block":
         _audit("blocked", {}, {})
@@ -148,10 +166,42 @@ def chat(
             "injection_verdict": injection.verdict,
         }
 
-    try:
-        result, vault = pipeline.process(req.prompt, req.profile)
-    except PolicyError as exc:
-        raise HTTPException(status_code=404, detail="unknown profile") from exc
+    override_count = 0
+    if overrides:
+        try:
+            base_action_for = pipeline._policy.action_for(req.profile)
+        except PolicyError as exc:
+            raise HTTPException(status_code=404, detail="unknown profile") from exc
+
+        def action_for(type_name: str) -> str:
+            base = base_action_for(type_name)
+            if type_name in overrides and base != "block":
+                return overrides[type_name]
+            return base
+
+        detections = pipeline.analyze(req.prompt, req.profile)
+        detected_types = {d.type for d in detections}
+        override_count = sum(
+            1
+            for type_name in overrides
+            if type_name in detected_types and base_action_for(type_name) != "block"
+        )
+        vault = Vault()
+        protect_result = protect(req.prompt, detections, action_for, vault)
+        findings = [(d.type, d.start, d.end, d.confidence) for d in detections]
+        result = PipelineResult(
+            protected_text=protect_result.text,
+            blocked=protect_result.blocked,
+            blocked_types=protect_result.blocked_types,
+            findings=findings,
+            applied=protect_result.applied,
+            profile=req.profile or pipeline._policy._default_profile or "",
+        )
+    else:
+        try:
+            result, vault = pipeline.process(req.prompt, req.profile)
+        except PolicyError as exc:
+            raise HTTPException(status_code=404, detail="unknown profile") from exc
 
     counts = dict(Counter(t for t, *_ in result.findings))
     acts: dict[str, str] = {}
@@ -159,7 +209,7 @@ def chat(
         acts[type_name] = action
 
     if result.blocked:
-        _audit("blocked", counts, acts)
+        _audit("blocked", counts, acts, override_count)
         return {
             "decision": "blocked",
             "blocked_types": result.blocked_types,
@@ -169,12 +219,12 @@ def chat(
     try:
         raw_reply = llm.complete(result.protected_text)
     except LLMError as exc:
-        _audit("blocked", counts, acts)
+        _audit("blocked", counts, acts, override_count)
         raise HTTPException(status_code=502, detail="LLM request failed") from exc
 
     reply = pipeline.restore(vault, raw_reply)
     decision = "modified" if result.applied else "allowed"
-    _audit(decision, counts, acts)
+    _audit(decision, counts, acts, override_count)
     return {
         "decision": decision,
         "reply": reply,
