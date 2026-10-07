@@ -63,8 +63,12 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
     (
         "instruction_override",
         re.compile(
-            r"(?:ignore|disregard|forget)\s+(?:all|any|the)?\s*"
-            r"(?:previous|prior|above)\s+(?:instructions?|rules?)",
+            r"(?:ignore|disregard|forget|override|do\s+not\s+follow|"
+            r"stop\s+following)\s+"
+            r"(?:(?:all|any|the|your|my)\s+){0,2}"
+            r"(?:(?:previous|prior|earlier|original|above)\s+)?"
+            r"(?:instructions?|rules?|constraints?|guidelines?|guardrails?|"
+            r"system\s+message|system\s+prompt|safety\s+rules?)",
             re.IGNORECASE,
         ),
         0.8,
@@ -72,17 +76,52 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
     (
         "system_prompt_extraction",
         re.compile(
-            r"(?:reveal|show|print|repeat)\s+(?:your|the)\s+"
-            r"(?:system\s+prompt|hidden\s+instructions?)",
+            r"(?:reveal|show|print|repeat|output|leak|dump|list|display|"
+            r"tell\s+me)\s+"
+            r"(?:\w+\s+){0,4}?"
+            r"(?:system\s+prompt|hidden\s+(?:prompt|instructions?)|"
+            r"(?:internal|full|exact)\s+instructions?|configuration|"
+            r"instructions?\s+you\s+were\s+given)",
             re.IGNORECASE,
         ),
         0.8,
     ),
     (
+        "system_prompt_extraction",
+        re.compile(
+            r"(?:reveal|show|output|leak|dump|list|display|tell\s+me)\s+"
+            r"(?:\w+\s+){0,4}?(?:the\s+)?(?:text|everything)\s+above",
+            re.IGNORECASE,
+        ),
+        0.8,
+    ),
+    # Bare "repeat/print the text above" is a weaker signal: warn only.
+    (
+        "system_prompt_extraction",
+        re.compile(
+            r"(?:repeat|print)\s+(?:\w+\s+){0,4}?(?:the\s+)?"
+            r"(?:text|everything)\s+above",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
         "jailbreak_persona",
         re.compile(
-            r"(?:you\s+are\s+now\s+dan|developer\s+mode\s+enabled|"
-            r"act\s+as\s+an?\s+unrestricted\s+(?:ai|assistant|model))",
+            r"(?:act\s+as|adopt|role[\s-]?play\s+as|simulate|switch\s+into|"
+            r"pretend\s+to\s+be)\s+(?:an?\s+)?"
+            r"(?:dan|stan|evil\s+twin|developer\s+mode|jailbroken\s+model|"
+            r"unrestricted\s+(?:ai|assistant|model)|"
+            r"ai\s+with\s+no\s+(?:rules?|guidelines?|content\s+policy|"
+            r"restrictions?|ethics))\b",
+            re.IGNORECASE,
+        ),
+        0.7,
+    ),
+    (
+        "jailbreak_persona",
+        re.compile(
+            r"(?:you\s+are\s+now\s+dan|developer\s+mode\s+enabled)",
             re.IGNORECASE,
         ),
         0.7,
@@ -90,8 +129,11 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
     (
         "safety_bypass",
         re.compile(
-            r"(?:bypass|disable)\s+(?:your|the)\s+(?:safety\s+)?"
-            r"(?:filters?|restrictions?)|without\s+any\s+restrictions",
+            r"(?:bypass|disable|turn\s+off|ignore|circumvent)\s+"
+            r"(?:your\s+|the\s+|our\s+)?"
+            r"(?:safety\s+(?:layer|checks?|filters?)|content\s+filters?|"
+            r"safeguards?|guardrails?|restrictions?)|"
+            r"without\s+(?:any\s+)?(?:restrictions?|guidelines?)",
             re.IGNORECASE,
         ),
         0.5,
@@ -99,9 +141,23 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
     (
         "data_exfiltration",
         re.compile(
-            r"(?:send|post|forward)\s+the\s+(?:data|conversation|api\s+key)\s+"
-            r"to\s+(?:a\s+)?(?:url|email|server|webhook)|"
-            r"include\s+(?:the\s+)?(?:secrets?|api\s+key|credentials?)\s+"
+            r"(?:leak|send|forward|post)\s+(?:the\s+|your\s+|my\s+)?"
+            r"(?:data|conversation|secrets?|api\s*key|credentials?)"
+            r"(?:\s+to\s+(?:a\s+|an\s+|the\s+|my\s+)?"
+            r"(?:url|email|server|webhook))?",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "data_exfiltration",
+        re.compile(r"\bexfiltrate\b", re.IGNORECASE),
+        0.5,
+    ),
+    (
+        "data_exfiltration",
+        re.compile(
+            r"include\s+(?:the\s+)?(?:secrets?|api\s*key|credentials?)\s+"
             r"in\s+(?:the\s+)?reply",
             re.IGNORECASE,
         ),
