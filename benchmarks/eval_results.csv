@@ -1,0 +1,15 @@
+section,type,tp,fp,fn,precision,recall,f1
+pii,AADHAAR,8,0,0,1.0,1.0,1.0
+pii,API_KEY,5,0,0,1.0,1.0,1.0
+pii,CREDIT_CARD,9,0,0,1.0,1.0,1.0
+pii,EMAIL,14,0,0,1.0,1.0,1.0
+pii,IP_ADDRESS,7,0,0,1.0,1.0,1.0
+pii,KEYWORD,4,0,0,1.0,1.0,1.0
+pii,PAN,5,0,0,1.0,1.0,1.0
+pii,PHONE,11,0,0,1.0,1.0,1.0
+pii,overall,63,0,0,1.0,1.0,1.0
+injection,overall,23,0,2,1.0,0.92,0.9583
+fpr,clean,,,,,,0.0
+fpr,hard_negative,,,,,,0.0
+latency_ms,mean,,,,0.052,,
+latency_ms,p95,,,,0.093,,
