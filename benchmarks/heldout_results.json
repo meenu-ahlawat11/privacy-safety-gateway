@@ -1,0 +1,57 @@
+{
+  "counts": {
+    "pii": 0,
+    "injection": 20,
+    "clean": 15,
+    "hard_negative": 0
+  },
+  "pii": {
+    "overall": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0
+    },
+    "per_type": {}
+  },
+  "injection": {
+    "tp": 1,
+    "fp": 0,
+    "fn": 19,
+    "tn": 15,
+    "precision": 1.0,
+    "recall": 0.05,
+    "f1": 0.0952,
+    "fpr_clean": 0.0,
+    "fpr_hard_negative": 0.0,
+    "missed_ids": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "false_positive_ids": []
+  },
+  "latency_ms": {
+    "mean": 0.168,
+    "p95": 0.225
+  },
+  "errors": {}
+}

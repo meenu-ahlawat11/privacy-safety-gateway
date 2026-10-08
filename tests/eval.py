@@ -6,6 +6,7 @@ Raw prompt text and raw detected values are never printed or saved.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import time
@@ -20,8 +21,7 @@ from app.detectors.regex_det import RegexDetector
 from app.merge import merge_detections
 
 DATASET_PATH = Path("tests/dataset.json")
-CSV_OUT = Path("benchmarks/eval_results.csv")
-JSON_OUT = Path("benchmarks/eval_results.json")
+OUT_PREFIX = "benchmarks/eval_results"
 POSITIVE_VERDICTS = {"warn", "block"}
 CATEGORIES = ("pii", "injection", "clean", "hard_negative")
 
@@ -30,14 +30,15 @@ def load_dataset(path: Path = DATASET_PATH) -> list[dict[str, Any]]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-KEYWORD_TERMS: list[str] = sorted(
-    {
-        label["value"]
-        for item in load_dataset()
-        for label in item["labels"]
-        if label["type"] == "KEYWORD"
-    }
-)
+def keyword_terms(dataset: list[dict[str, Any]]) -> list[str]:
+    return sorted(
+        {
+            label["value"]
+            for item in dataset
+            for label in item["labels"]
+            if label["type"] == "KEYWORD"
+        }
+    )
 
 
 def precision_recall_f1(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
@@ -98,7 +99,7 @@ def evaluate(dataset: list[dict[str, Any]]) -> dict[str, Any]:
     has_keywords = any(
         lab["type"] == "KEYWORD" for item in dataset for lab in item["labels"]
     )
-    keywords = KeywordDetector(KEYWORD_TERMS) if has_keywords else None
+    keywords = KeywordDetector(keyword_terms(dataset)) if has_keywords else None
     scanner = InjectionScanner()
 
     pii_totals: dict[str, dict[str, int]] = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
@@ -111,6 +112,8 @@ def evaluate(dataset: list[dict[str, Any]]) -> dict[str, Any]:
     n_clean = flagged_clean = 0
     n_hard = flagged_hard = 0
     cat_counts: Counter[str] = Counter()
+    missed_injection_ids: list[int] = []
+    flagged_nonattack_ids: list[int] = []
 
     for item in dataset:
         text = item["text"]
@@ -139,8 +142,10 @@ def evaluate(dataset: list[dict[str, Any]]) -> dict[str, Any]:
             inj_tp += 1
         elif predicted_injection and not truth_injection:
             inj_fp += 1
+            flagged_nonattack_ids.append(item["id"])
         elif not predicted_injection and truth_injection:
             inj_fn += 1
+            missed_injection_ids.append(item["id"])
         else:
             inj_tn += 1
         if item["category"] == "clean":
@@ -188,6 +193,8 @@ def evaluate(dataset: list[dict[str, Any]]) -> dict[str, Any]:
             "f1": round(if1, 4),
             "fpr_clean": round(flagged_clean / n_clean, 4) if n_clean else 0.0,
             "fpr_hard_negative": round(flagged_hard / n_hard, 4) if n_hard else 0.0,
+            "missed_ids": missed_injection_ids,
+            "false_positive_ids": flagged_nonattack_ids,
         },
         "latency_ms": {
             "mean": round(sum(latencies) / len(latencies), 3) if latencies else 0.0,
@@ -198,23 +205,34 @@ def evaluate(dataset: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def print_table(results: dict[str, Any]) -> None:
-    print("PII per-type (tp/fp/fn, precision, recall, f1):")
-    for det_type, m in results["pii"]["per_type"].items():
-        print(
-            f"  {det_type:<12} tp={m['tp']:<3} fp={m['fp']:<3} fn={m['fn']:<3} "
-            f"P={m['precision']:.3f} R={m['recall']:.3f} F1={m['f1']:.3f}"
-        )
-    o = results["pii"]["overall"]
-    print(
-        f"  OVERALL      tp={o['tp']:<3} fp={o['fp']:<3} fn={o['fn']:<3} "
-        f"P={o['precision']:.3f} R={o['recall']:.3f} F1={o['f1']:.3f}"
+    has_pii = bool(results["pii"]["per_type"]) or any(
+        results["pii"]["overall"][key] for key in ("tp", "fp", "fn")
     )
+    if has_pii:
+        print("PII per-type (tp/fp/fn, precision, recall, f1):")
+        for det_type, m in results["pii"]["per_type"].items():
+            print(
+                f"  {det_type:<12} tp={m['tp']:<3} fp={m['fp']:<3} fn={m['fn']:<3} "
+                f"P={m['precision']:.3f} R={m['recall']:.3f} F1={m['f1']:.3f}"
+            )
+        o = results["pii"]["overall"]
+        print(
+            f"  OVERALL      tp={o['tp']:<3} fp={o['fp']:<3} fn={o['fn']:<3} "
+            f"P={o['precision']:.3f} R={o['recall']:.3f} F1={o['f1']:.3f}"
+        )
+    else:
+        print("PII: no PII labels in dataset, skipping PII table.")
     i = results["injection"]
     print(
         f"Injection: tp={i['tp']} fp={i['fp']} fn={i['fn']} tn={i['tn']} "
         f"P={i['precision']:.3f} R={i['recall']:.3f} F1={i['f1']:.3f} "
         f"FPR(clean)={i['fpr_clean']:.3f} FPR(hard_negative)={i['fpr_hard_negative']:.3f}"
     )
+    if i["missed_ids"] or i["false_positive_ids"]:
+        print(
+            f"Injection missed attack ids={i['missed_ids']} "
+            f"false-positive ids={i['false_positive_ids']}"
+        )
     print(
         f"Latency per prompt: mean={results['latency_ms']['mean']:.3f} ms, "
         f"p95={results['latency_ms']['p95']:.3f} ms"
@@ -228,10 +246,12 @@ def print_table(results: dict[str, Any]) -> None:
             )
 
 
-def save_results(results: dict[str, Any]) -> None:
-    CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
-    JSON_OUT.parent.mkdir(parents=True, exist_ok=True)
-    JSON_OUT.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+def save_results(results: dict[str, Any], out_prefix: str = OUT_PREFIX) -> tuple[Path, Path]:
+    csv_out = Path(f"{out_prefix}.csv")
+    json_out = Path(f"{out_prefix}.json")
+    csv_out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
 
     rows: list[list[Any]] = []
     for det_type, m in results["pii"]["per_type"].items():
@@ -240,7 +260,7 @@ def save_results(results: dict[str, Any]) -> None:
     rows.append(["pii", "overall", o["tp"], o["fp"], o["fn"], o["precision"], o["recall"], o["f1"]])
     i = results["injection"]
     rows.append(["injection", "overall", i["tp"], i["fp"], i["fn"], i["precision"], i["recall"], i["f1"]])
-    with CSV_OUT.open("w", newline="", encoding="utf-8") as fh:
+    with csv_out.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["section", "type", "tp", "fp", "fn", "precision", "recall", "f1"])
         writer.writerows(rows)
@@ -248,14 +268,23 @@ def save_results(results: dict[str, Any]) -> None:
         writer.writerow(["fpr", "hard_negative", "", "", "", "", "", i["fpr_hard_negative"]])
         writer.writerow(["latency_ms", "mean", "", "", "", results["latency_ms"]["mean"], "", ""])
         writer.writerow(["latency_ms", "p95", "", "", "", results["latency_ms"]["p95"], "", ""])
+    return csv_out, json_out
 
 
-def main() -> None:
-    dataset = load_dataset()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default="tests/dataset.json")
+    parser.add_argument("--out-prefix", default=OUT_PREFIX)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    dataset = load_dataset(Path(args.dataset))
     results = evaluate(dataset)
     print_table(results)
-    save_results(results)
-    print(f"Wrote {CSV_OUT} and {JSON_OUT}")
+    csv_out, json_out = save_results(results, args.out_prefix)
+    print(f"Wrote {csv_out} and {json_out}")
 
 
 if __name__ == "__main__":

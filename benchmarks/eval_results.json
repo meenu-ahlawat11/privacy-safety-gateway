@@ -90,11 +90,16 @@
     "recall": 0.92,
     "f1": 0.9583,
     "fpr_clean": 0.0,
-    "fpr_hard_negative": 0.0
+    "fpr_hard_negative": 0.0,
+    "missed_ids": [
+      57,
+      69
+    ],
+    "false_positive_ids": []
   },
   "latency_ms": {
-    "mean": 0.052,
-    "p95": 0.093
+    "mean": 0.109,
+    "p95": 0.154
   },
   "errors": {}
 }
