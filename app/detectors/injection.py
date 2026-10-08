@@ -64,11 +64,31 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
         "instruction_override",
         re.compile(
             r"(?:ignore|disregard|forget|override|do\s+not\s+follow|"
-            r"stop\s+following)\s+"
-            r"(?:(?:all|any|the|your|my)\s+){0,2}"
-            r"(?:(?:previous|prior|earlier|original|above)\s+)?"
+            r"stop\s+following|set\s+aside|replace|supersede|discard|"
+            r"drop|throw\s+away)\s+"
+            r"(?:[\w,'-]+\s+){0,6}?"
             r"(?:instructions?|rules?|constraints?|guidelines?|guardrails?|"
-            r"system\s+message|system\s+prompt|safety\s+rules?)",
+            r"system\s+message|system\s+prompt|safety\s+rules?|task\s+list|"
+            r"directives?|setup|programming|prompt)\b"
+            r"(?!\s+(?:section|chapter|paragraph|part|document|report)\b)",
+            re.IGNORECASE,
+        ),
+        0.8,
+    ),
+    (
+        "instruction_override",
+        re.compile(r"do\s+exactly\s+what\s+I\s+say", re.IGNORECASE),
+        0.8,
+    ),
+    (
+        "instruction_override",
+        re.compile(
+            r"(?:system\s+update|new\s+priority|priority\s+message|admin\s+notice)"
+            r"[^.?\n]{0,60}?"
+            r"(?:your|the)\s+(?:earlier|previous|prior|old)\s+"
+            r"(?:guidelines?|instructions?|rules?)"
+            r"[^.?\n]{0,60}?"
+            r"(?:deprecated|replaced?|void|obsolete|overridden)",
             re.IGNORECASE,
         ),
         0.8,
@@ -106,6 +126,48 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
         0.5,
     ),
     (
+        "system_prompt_extraction",
+        re.compile(
+            r"what\s+(?:were|are|was|is)[^.?\n]{0,50}?"
+            r"(?:system\s+prompt|hidden\s+configuration)",
+            re.IGNORECASE,
+        ),
+        0.8,
+    ),
+    (
+        "system_prompt_extraction",
+        re.compile(
+            r"what\s+(?:were|are)\s+(?:the\s+|your\s+)?(?:exact\s+)?"
+            r"(?:instructions?|rules?|configuration)\b"
+            r"(?![^.?\n]{0,60}?(?:system\s+prompt|hidden\s+configuration))"
+            r"(?=[^.?\n]{0,40}?\b(?:your|you|hidden|secret|system)\b)",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "system_prompt_extraction",
+        re.compile(
+            r"(?:summari[sz]e|repeat|copy)[\s,]+(?:[\w,'-]+\s+){0,8}?"
+            r"(?:word\s+for\s+word[\s,]+|verbatim[\s,]+)?"
+            r"(?:[\w,'-]+\s+){0,8}?"
+            r"(?:text|block|everything)\s+(?:immediately\s+)?"
+            r"(?:above|before)(?:\s+where)?\s+(?:my|this|the)\s+"
+            r"(?:messages?|conversations?)",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "system_prompt_extraction",
+        re.compile(
+            r"(?:reveal|print|show)\s+your\s+(?:internal|hidden|secret)\s+"
+            r"(?:setup|configuration|text|prompt)",
+            re.IGNORECASE,
+        ),
+        0.8,
+    ),
+    (
         "jailbreak_persona",
         re.compile(
             r"(?:act\s+as|adopt|role[\s-]?play\s+as|simulate|switch\s+into|"
@@ -127,6 +189,29 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
         0.7,
     ),
     (
+        "jailbreak_persona",
+        re.compile(
+            r"(?:pretend|imagine|act|role[\s-]?play|respond)\s+"
+            r"(?:you\s+are|your\s+name\s+is|as)\b"
+            r"[^.?\n]{0,40}?"
+            r"(?:no\s+restrictions?|never\s+refuses?|always\s+does\s+the\s+opposite|"
+            r"ignores?\s+every\s+(?:ethical\s+)?rules?|"
+            r"no\s+(?:rules?|ethics|limits?))",
+            re.IGNORECASE,
+        ),
+        0.7,
+    ),
+    (
+        "jailbreak_persona",
+        re.compile(
+            r"you\s+are\s+now\s+['\"]?\w[^.?\n]{0,40}?"
+            r"(?:rogue|unrestricted|opposite|no\s+(?:rules?|ethics|limits?)|"
+            r"ignores?\s+every)",
+            re.IGNORECASE,
+        ),
+        0.7,
+    ),
+    (
         "safety_bypass",
         re.compile(
             r"(?:bypass|disable|turn\s+off|ignore|circumvent)\s+"
@@ -134,6 +219,37 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
             r"(?:safety\s+(?:layer|checks?|filters?)|content\s+filters?|"
             r"safeguards?|guardrails?|restrictions?)|"
             r"without\s+(?:any\s+)?(?:restrictions?|guidelines?)",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "safety_bypass",
+        re.compile(
+            r"(?:your\s+|the\s+)?"
+            r"(?:safety\s+filters?|content\s+moderation|content\s+policy|"
+            r"guardrails?|restrictions?)\s+"
+            r"(?:are|is|have\s+been|has\s+been)\s+(?:now\s+)?"
+            r"(?:disabled|off|removed|lifted|suspended)",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "safety_bypass",
+        re.compile(
+            r"(?:your\s+|the\s+)?"
+            r"(?:content\s+moderation|safety\s+filters?|restrictions?)\s+"
+            r"(?:doesn't|does\s+not|don't)\s+exist",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "safety_bypass",
+        re.compile(
+            r"(?:temporarily\s+)?bypass\s+your\s+"
+            r"(?:content\s+policy|safety(?!\s+filters?)|filters?|guidelines?)",
             re.IGNORECASE,
         ),
         0.5,
@@ -152,6 +268,41 @@ _RULES: list[tuple[str, re.Pattern[str], float]] = [
     (
         "data_exfiltration",
         re.compile(r"\bexfiltrate\b", re.IGNORECASE),
+        0.5,
+    ),
+    (
+        "encoding_evasion",
+        re.compile(
+            r"(?:encode|encrypt|disguise|hide)\s+(?:your\s+)?"
+            r"(?:answer|response|output)\s+(?:\w+\s+){0,6}?"
+            r"(?:slips?|gets?)\s+past\s+(?:the\s+)?(?:safety|filters?|checks?)",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "data_exfiltration",
+        re.compile(
+            r"(?:send|forward|mail|email|upload|post|transmit)\s+"
+            r"(?:\w+\s+){0,12}?"
+            r"(?:everything|all|any|the|our|my)\s+"
+            r"(?:\w+\s+){0,12}?"
+            r"(?:sensitive|private|confidential|chat\s+history|conversation|"
+            r"details|data)\s+"
+            r"(?:\w+\s+){0,12}?"
+            r"(?:to|at)\s+(?:https?://\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+)",
+            re.IGNORECASE,
+        ),
+        0.5,
+    ),
+    (
+        "data_exfiltration",
+        re.compile(
+            r"compose\s+an?\s+email\s+containing\s+(?:the\s+|all\s+|everything\s+)?"
+            r"(?:\w+\s+){0,4}?"
+            r"(?:chat\s+history|conversation|details|data)",
+            re.IGNORECASE,
+        ),
         0.5,
     ),
     (

@@ -11,5 +11,5 @@ pii,overall,63,0,0,1.0,1.0,1.0
 injection,overall,23,0,2,1.0,0.92,0.9583
 fpr,clean,,,,,,0.0
 fpr,hard_negative,,,,,,0.0
-latency_ms,mean,,,,0.109,,
-latency_ms,p95,,,,0.154,,
+latency_ms,mean,,,,0.189,,
+latency_ms,p95,,,,0.26,,

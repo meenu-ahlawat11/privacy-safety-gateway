@@ -1,7 +1,7 @@
 section,type,tp,fp,fn,precision,recall,f1
 pii,overall,0,0,0,0.0,0.0,0.0
-injection,overall,1,0,19,1.0,0.05,0.0952
+injection,overall,14,0,6,1.0,0.7,0.8235
 fpr,clean,,,,,,0.0
 fpr,hard_negative,,,,,,0.0
-latency_ms,mean,,,,0.168,,
-latency_ms,p95,,,,0.225,,
+latency_ms,mean,,,,0.275,,
+latency_ms,p95,,,,0.361,,
