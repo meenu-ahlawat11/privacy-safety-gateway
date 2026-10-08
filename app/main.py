@@ -1,5 +1,6 @@
 """FastAPI application: gateway between user and LLM."""
 
+import os
 from collections import Counter
 from typing import Any
 
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.audit import AuditLog
 from app.detectors.injection import InjectionScanner
 from app.llm_client import LLMClient, LLMError, get_client
+from app.llm_guard import LLMInjectionGuard, combine_verdicts
 from app.pipeline import Pipeline, PipelineResult
 from app.policy import PolicyError
 from app.protect import protect
@@ -54,6 +56,11 @@ def get_llm_client(request: Request) -> LLMClient:
     return request.app.state.llm_client
 
 
+def guard_enabled() -> bool:
+    """LLM injection guard is opt-in via LLM_GUARD=1."""
+    return os.environ.get("LLM_GUARD", "").strip() == "1"
+
+
 # ---------- request/response models ----------
 
 
@@ -89,6 +96,7 @@ def analyze(
     req: AnalyzeRequest,
     pipeline: Pipeline = Depends(get_pipeline),
     scanner: InjectionScanner = Depends(get_scanner),
+    llm: LLMClient = Depends(get_llm_client),
 ) -> dict[str, Any]:
     if not req.prompt.strip():
         raise HTTPException(status_code=422, detail="empty prompt")
@@ -110,12 +118,24 @@ def analyze(
         for d in detections
     ]
     categories = sorted({m.category for m in injection.matches})
+
+    guard = "off"
+    verdict = injection.verdict
+    if guard_enabled() and verdict == "allow":
+        vault = Vault()
+        protect_result = protect(
+            req.prompt, detections, action_for, vault
+        )
+        guard = LLMInjectionGuard(llm).classify(protect_result.text)
+        verdict = combine_verdicts(verdict, guard)
+
     return {
         "findings": findings,
         "injection": {
             "score": injection.score,
-            "verdict": injection.verdict,
+            "verdict": verdict,
             "categories": categories,
+            "guard": guard,
         },
         "prompt_length": len(req.prompt),
     }
@@ -139,13 +159,14 @@ def chat(
         counts: dict[str, int],
         acts: dict[str, str],
         override_count: int = 0,
+        verdict: str | None = None,
     ) -> None:
         audit_log.record(
             profile=req.profile or pipeline._policy._default_profile or "",
             finding_counts=counts,
             actions=acts,
             injection_score=injection.score,
-            injection_verdict=injection.verdict,
+            injection_verdict=verdict if verdict is not None else injection.verdict,
             decision=decision,
             overrides=override_count,
             prompt_length=len(req.prompt),
@@ -164,6 +185,7 @@ def chat(
             "decision": "blocked",
             "reason": "prompt_injection",
             "injection_verdict": injection.verdict,
+            "injection": {"verdict": injection.verdict, "guard": "off"},
         }
 
     override_count = 0
@@ -208,28 +230,36 @@ def chat(
     for type_name, action in result.applied:
         acts[type_name] = action
 
+    guard = "off"
+    final_verdict = injection.verdict
+    if guard_enabled() and injection.verdict == "allow":
+        guard = LLMInjectionGuard(llm).classify(result.protected_text)
+        final_verdict = combine_verdicts(injection.verdict, guard)
+
     if result.blocked:
-        _audit("blocked", counts, acts, override_count)
+        _audit("blocked", counts, acts, override_count, final_verdict)
         return {
             "decision": "blocked",
             "blocked_types": result.blocked_types,
-            "injection_verdict": injection.verdict,
+            "injection_verdict": final_verdict,
+            "injection": {"verdict": final_verdict, "guard": guard},
         }
 
     try:
         raw_reply = llm.complete(result.protected_text)
     except LLMError as exc:
-        _audit("blocked", counts, acts, override_count)
+        _audit("blocked", counts, acts, override_count, final_verdict)
         raise HTTPException(status_code=502, detail="LLM request failed") from exc
 
     reply = pipeline.restore(vault, raw_reply)
     decision = "modified" if result.applied else "allowed"
-    _audit(decision, counts, acts, override_count)
+    _audit(decision, counts, acts, override_count, final_verdict)
     return {
         "decision": decision,
         "reply": reply,
         "applied": [{"type": t, "action": a} for t, a in result.applied],
-        "injection_verdict": injection.verdict,
+        "injection_verdict": final_verdict,
+        "injection": {"verdict": final_verdict, "guard": guard},
     }
 
 

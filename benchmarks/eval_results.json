@@ -98,8 +98,8 @@
     "false_positive_ids": []
   },
   "latency_ms": {
-    "mean": 0.189,
-    "p95": 0.26
+    "mean": 0.159,
+    "p95": 0.253
   },
   "errors": {}
 }
