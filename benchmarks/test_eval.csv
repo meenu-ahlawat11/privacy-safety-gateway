@@ -1,0 +1,15 @@
+section,type,tp,fp,fn,precision,recall,f1
+pii,overall,0,0,0,0.0,0.0,0.0
+injection,overall,13,0,12,1.0,0.52,0.6842
+injection_guard,overall,24,0,1,1.0,0.96,0.9796
+fpr,clean,,,,,,0.0
+fpr,hard_negative,,,,,,0.0
+fpr,clean_guard,,,,,,0.0
+fpr,hard_negative_guard,,,,,,0.0
+guard_calls,yes,11,,,,,
+guard_calls,no,16,,,,,
+guard_calls,unknown,0,,,,,
+guard_latency_ms,mean,,,,1204.155,,
+guard_latency_ms,p95,,,,1731.348,,
+latency_ms,mean,,,,0.332,,
+latency_ms,p95,,,,0.728,,

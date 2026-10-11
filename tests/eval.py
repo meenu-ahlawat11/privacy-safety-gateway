@@ -18,6 +18,8 @@ from app.detectors.base import Detection
 from app.detectors.injection import InjectionScanner
 from app.detectors.keyword_trie import KeywordDetector
 from app.detectors.regex_det import RegexDetector
+from app.llm_client import get_client
+from app.llm_guard import LLMInjectionGuard, combine_verdicts
 from app.merge import merge_detections
 
 DATASET_PATH = Path("tests/dataset.json")
@@ -204,6 +206,104 @@ def evaluate(dataset: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def evaluate_with_guard(
+    dataset: list[dict[str, Any]], base_results: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Run LLM guard on prompts where rule verdict is 'allow' and combine verdicts."""
+    try:
+        client = get_client()
+    except Exception as e:
+        print(f"Guard unavailable: {e}")
+        return None
+
+    guard = LLMInjectionGuard(client)
+    scanner = InjectionScanner()
+
+    guard_tp = guard_fp = guard_fn = guard_tn = 0
+    guard_flagged_clean = 0
+    guard_flagged_hard = 0
+    guard_missed_ids: list[int] = []
+    guard_flagged_nonattack_ids: list[int] = []
+
+    guard_yes = guard_no = guard_unknown = 0
+    guard_latencies: list[float] = []
+
+    n_clean = base_results["counts"]["clean"]
+    n_hard = base_results["counts"]["hard_negative"]
+
+    for item in dataset:
+        text = item["text"]
+        category = item["category"]
+        truth_injection = category == "injection"
+
+        rule_result = scanner.scan(text)
+        rule_verdict = rule_result.verdict
+
+        predicted_injection = rule_verdict in POSITIVE_VERDICTS
+
+        if rule_verdict == "allow":
+            start = time.perf_counter()
+            try:
+                guard_result = guard.classify(text)
+            except Exception:
+                guard_result = "unknown"
+            elapsed = (time.perf_counter() - start) * 1000.0
+            guard_latencies.append(elapsed)
+
+            if guard_result == "yes":
+                guard_yes += 1
+            elif guard_result == "no":
+                guard_no += 1
+            else:
+                guard_unknown += 1
+
+            combined = combine_verdicts(rule_verdict, guard_result)
+            predicted_injection = combined in POSITIVE_VERDICTS
+
+            time.sleep(0.3)
+        else:
+            combined = rule_verdict
+
+        if predicted_injection and truth_injection:
+            guard_tp += 1
+        elif predicted_injection and not truth_injection:
+            guard_fp += 1
+            guard_flagged_nonattack_ids.append(item["id"])
+        elif not predicted_injection and truth_injection:
+            guard_fn += 1
+            guard_missed_ids.append(item["id"])
+        else:
+            guard_tn += 1
+
+        if category == "clean":
+            guard_flagged_clean += int(predicted_injection)
+        elif category == "hard_negative":
+            guard_flagged_hard += int(predicted_injection)
+
+    gp, gr, gf1 = precision_recall_f1(guard_tp, guard_fp, guard_fn)
+    sorted_guard_lat = sorted(guard_latencies)
+    p95_idx = min(len(sorted_guard_lat) - 1, int(0.95 * len(sorted_guard_lat))) if guard_latencies else 0
+
+    return {
+        "tp": guard_tp,
+        "fp": guard_fp,
+        "fn": guard_fn,
+        "tn": guard_tn,
+        "precision": round(gp, 4),
+        "recall": round(gr, 4),
+        "f1": round(gf1, 4),
+        "fpr_clean": round(guard_flagged_clean / n_clean, 4) if n_clean else 0.0,
+        "fpr_hard_negative": round(guard_flagged_hard / n_hard, 4) if n_hard else 0.0,
+        "missed_ids": guard_missed_ids,
+        "false_positive_ids": guard_flagged_nonattack_ids,
+        "guard_calls": {"yes": guard_yes, "no": guard_no, "unknown": guard_unknown},
+        "guard_latency_ms": {
+            "mean": round(sum(guard_latencies) / len(guard_latencies), 3) if guard_latencies else 0.0,
+            "p95": round(sorted_guard_lat[p95_idx], 3) if guard_latencies else 0.0,
+        },
+    }
+
+
 def print_table(results: dict[str, Any]) -> None:
     has_pii = bool(results["pii"]["per_type"]) or any(
         results["pii"]["overall"][key] for key in ("tp", "fp", "fn")
@@ -222,12 +322,31 @@ def print_table(results: dict[str, Any]) -> None:
         )
     else:
         print("PII: no PII labels in dataset, skipping PII table.")
+
     i = results["injection"]
     print(
-        f"Injection: tp={i['tp']} fp={i['fp']} fn={i['fn']} tn={i['tn']} "
+        f"Injection (rules): tp={i['tp']} fp={i['fp']} fn={i['fn']} tn={i['tn']} "
         f"P={i['precision']:.3f} R={i['recall']:.3f} F1={i['f1']:.3f} "
         f"FPR(clean)={i['fpr_clean']:.3f} FPR(hard_negative)={i['fpr_hard_negative']:.3f}"
     )
+
+    if "injection_guard" in results:
+        g = results["injection_guard"]
+        print(
+            f"Injection (rules+guard): tp={g['tp']} fp={g['fp']} fn={g['fn']} tn={g['tn']} "
+            f"P={g['precision']:.3f} R={g['recall']:.3f} F1={g['f1']:.3f} "
+            f"FPR(clean)={g['fpr_clean']:.3f} FPR(hard_negative)={g['fpr_hard_negative']:.3f}"
+        )
+        if g["missed_ids"] or g["false_positive_ids"]:
+            print(
+                f"Injection (rules+guard) missed attack ids={g['missed_ids']} "
+                f"false-positive ids={g['false_positive_ids']}"
+            )
+        gc = g["guard_calls"]
+        print(f"Guard calls: yes={gc['yes']} no={gc['no']} unknown={gc['unknown']}")
+        gl = g["guard_latency_ms"]
+        print(f"Guard latency per call: mean={gl['mean']:.3f} ms, p95={gl['p95']:.3f} ms")
+
     if i["missed_ids"] or i["false_positive_ids"]:
         print(
             f"Injection missed attack ids={i['missed_ids']} "
@@ -260,12 +379,26 @@ def save_results(results: dict[str, Any], out_prefix: str = OUT_PREFIX) -> tuple
     rows.append(["pii", "overall", o["tp"], o["fp"], o["fn"], o["precision"], o["recall"], o["f1"]])
     i = results["injection"]
     rows.append(["injection", "overall", i["tp"], i["fp"], i["fn"], i["precision"], i["recall"], i["f1"]])
+    if "injection_guard" in results:
+        g = results["injection_guard"]
+        rows.append(["injection_guard", "overall", g["tp"], g["fp"], g["fn"], g["precision"], g["recall"], g["f1"]])
     with csv_out.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["section", "type", "tp", "fp", "fn", "precision", "recall", "f1"])
         writer.writerows(rows)
         writer.writerow(["fpr", "clean", "", "", "", "", "", i["fpr_clean"]])
         writer.writerow(["fpr", "hard_negative", "", "", "", "", "", i["fpr_hard_negative"]])
+        if "injection_guard" in results:
+            g = results["injection_guard"]
+            writer.writerow(["fpr", "clean_guard", "", "", "", "", "", g["fpr_clean"]])
+            writer.writerow(["fpr", "hard_negative_guard", "", "", "", "", "", g["fpr_hard_negative"]])
+            gc = g["guard_calls"]
+            writer.writerow(["guard_calls", "yes", gc["yes"], "", "", "", "", ""])
+            writer.writerow(["guard_calls", "no", gc["no"], "", "", "", "", ""])
+            writer.writerow(["guard_calls", "unknown", gc["unknown"], "", "", "", "", ""])
+            gl = g["guard_latency_ms"]
+            writer.writerow(["guard_latency_ms", "mean", "", "", "", gl["mean"], "", ""])
+            writer.writerow(["guard_latency_ms", "p95", "", "", "", gl["p95"], "", ""])
         writer.writerow(["latency_ms", "mean", "", "", "", results["latency_ms"]["mean"], "", ""])
         writer.writerow(["latency_ms", "p95", "", "", "", results["latency_ms"]["p95"], "", ""])
     return csv_out, json_out
@@ -275,6 +408,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="tests/dataset.json")
     parser.add_argument("--out-prefix", default=OUT_PREFIX)
+    parser.add_argument("--guard", action="store_true", help="Enable LLM guard evaluation")
     return parser.parse_args(argv)
 
 
@@ -282,6 +416,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     dataset = load_dataset(Path(args.dataset))
     results = evaluate(dataset)
+    if args.guard:
+        guard_results = evaluate_with_guard(dataset, results)
+        if guard_results is not None:
+            results["injection_guard"] = guard_results
     print_table(results)
     csv_out, json_out = save_results(results, args.out_prefix)
     print(f"Wrote {csv_out} and {json_out}")
