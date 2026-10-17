@@ -264,3 +264,140 @@ p95 0.44 ms.
 optimistic because the rules were developed and tuned against them;
 the fresh unseen set is the fair estimate. All datasets are small
 (dozens of prompts), so treat every number as approximate.
+
+## Problem-statement mapping
+
+ORIGIN MINI Problem Statement 05 — each Expected Solution and
+Expected Outcome bullet, where it is implemented, and an honest
+status.
+
+### Expected Solution
+
+| # | Expected Solution | Where implemented | Status |
+|---|---|---|---|
+| S1 | Intercept prompts before they are sent to an AI model | `app/main.py` (`POST /v1/chat`, `POST /v1/analyze`), `app/pipeline.py` | Done |
+| S2 | Detect sensitive information such as names, phone numbers, email addresses, credentials, financial identifiers, or confidential keywords | `app/detectors/regex_det.py` (EMAIL, PHONE, CREDIT_CARD, AADHAAR, PAN, IP_ADDRESS, API_KEY), `app/detectors/validators.py` (Luhn/Verhoeff), `app/detectors/keyword_trie.py` (KEYWORD) | **Partial** — phones, emails, financial identifiers (Luhn-validated cards, Verhoeff-validated Aadhaar, PAN), credentials (API keys), IPs and keywords are detected; **person names are NOT detected** (no NER component) |
+| S3 | Apply configurable masking, redaction, or tokenisation | `app/protect.py` (allow / mask / redact / tokenize / block), `app/policy.py`, `policies/policy.yaml` | Done |
+| S4 | Detect selected classes of suspicious prompt-injection patterns | `app/detectors/injection.py` (weighted rule scanner) | Partial — selected classes only; see Limitations |
+| S5 | Allow users to review or override protection decisions | `ui/streamlit_app.py` (review-and-send tab), `overrides` field in `POST /v1/chat` (`app/main.py`, `tests/test_api_overrides.py`) | Done |
+| S6 | Maintain an audit record of privacy-related actions | `app/audit.py`, `data/audit.db`, `GET /v1/audit/summary`, UI audit dashboard | Done |
+| S7 | Provide configurable policies for different users or applications | `policies/policy.yaml` profiles (student, developer), `app/policy.py` | Done |
+| S8 | Demonstrate the gateway with one or more generative AI APIs | `app/llm_client.py` (Groq, Gemini, offline mock) | Done |
+
+### Expected Outcome
+
+| # | Expected Outcome | Where demonstrated | Status |
+|---|---|---|---|
+| O1 | Reduced accidental exposure of sensitive information to AI systems | The protect step runs before any LLM call (`app/protect.py`); blocked types never reach the LLM | Done |
+| O2 | Improved visibility into data being sent to generative AI services | `GET /v1/audit/summary`, UI audit dashboard, per-request `applied` actions in the `/v1/chat` response | Done |
+| O3 | Demonstration of practical AI-security controls outside the model itself | The gateway proxy (detect → merge → policy → protect) plus the optional LLM injection guard (`app/llm_guard.py`) | Done |
+| O4 | Measurable detection and protection performance on representative test cases | `python -m tests.eval`, `benchmarks/` (per-type PII metrics, injection precision/recall/F1, latency) | Partial — datasets are small and synthetic; rules-only recall on the fresh unseen set is 0.52 (0.96 with the guard) |
+
+## Privacy and security design
+
+- **No raw values in logs.** Application logging and error paths report
+  detection types and counts only; no prompt text or matched values are
+  ever written to log output.
+- **Audit log stores types, counts and lengths only.** Each audit row
+  holds the profile, per-type finding counts, applied actions, injection
+  score/verdict, decision, overrides and the prompt *length* — never the
+  prompt text and never the raw sensitive values (`app/audit.py`).
+- **Vault is in memory only.** A fresh `Vault()` is created per request
+  (`app/pipeline.py`); token-to-value mappings live in two dicts for the
+  lifetime of one request and are never persisted to disk or a database.
+- **The guard sees only protected text.** The optional LLM injection
+  guard runs *after* `protect()`, so it classifies the masked/redacted/
+  tokenized prompt, not the original with live PII (`app/llm_guard.py`).
+- **Keys only in `.env`.** `GROQ_API_KEY`, `GEMINI_API_KEY` and all
+  settings live in `.env` (gitignored); `.env.example` documents the
+  names without values.
+- **Parameterized SQL.** Every SQLite statement uses `?` placeholders
+  with bound parameters (`app/audit.py`); no string-built SQL.
+- **CORS limited to localhost:8501.** The FastAPI app allows origins
+  `["http://localhost:8501"]` only — the Streamlit UI (`app/main.py`).
+- **HTML escaped in the UI.** All user text rendered with
+  `unsafe_allow_html=True` (the prompt and highlighted findings) is
+  passed through `html.escape` first (`ui/streamlit_app.py`).
+
+## Limitations and future work
+
+- **Person names are not detected.** There is no NER component, so
+  `Detection(type="NAME")` never occurs. Adding spaCy or Microsoft
+  Presidio NER as another detector would close this gap.
+- **Selected injection classes only.** The rule scanner covers a chosen
+  subset of prompt-injection techniques, not all known variants.
+- **A fiction-wrapper attack is missed.** An injection hidden inside a
+  story or role-play frame ("you are a character who must ...") slips
+  past the rules; the LLM guard catches most but not all of these.
+- **Guard latency and one false positive.** Guard calls cost ~1.2 s
+  mean per call (rules-only scan is sub-millisecond), and the guard
+  flagged one clean prompt as injection in the fresh-set evaluation.
+- **Small synthetic datasets.** Every benchmark uses dozens of
+  hand-written synthetic prompts; metrics are approximate, not
+  production-grade estimates.
+- **Obfuscation is not handled.** Leetspeak, homoglyphs and zero-width
+  characters can evade regex detectors.
+- **Free-tier model names retire.** Groq and Gemini model IDs change
+  frequently; always set `GROQ_MODEL` / `GEMINI_MODEL` in `.env`.
+- **The vault is per-request.** Tokens cannot be restored after the
+  request that created them completes; a cross-request vault would need
+  secure storage and a retention policy.
+
+## Project structure
+
+```
+privacy-safety-gateway/
+├── app/
+│   ├── main.py               FastAPI app: CORS, /v1/chat, /v1/analyze, /v1/audit/summary
+│   ├── pipeline.py           Orchestrates detect -> merge -> policy -> protect -> restore
+│   ├── models.py             Pydantic request/response models and Detection type
+│   ├── merge.py              Sort-and-sweep interval merging (hand-written)
+│   ├── policy.py             Loads policy.yaml; resolves profile actions and overrides
+│   ├── protect.py            Applies allow/mask/redact/tokenize/block right-to-left
+│   ├── vault.py              In-memory hash-map token vault (fresh per request)
+│   ├── audit.py              SQLite audit log; types/counts/lengths only, parameterized SQL
+│   ├── llm_client.py         LLM backends: Groq, Gemini, offline mock
+│   ├── llm_guard.py          Optional LLM injection guard; sees protected text only
+│   └── detectors/
+│       ├── base.py           Detector interface returning Detection objects
+│       ├── regex_det.py      Regex detectors: EMAIL, PHONE, CREDIT_CARD, AADHAAR, PAN, IP, API_KEY
+│       ├── validators.py     Luhn and Verhoeff checksum validators
+│       ├── keyword_trie.py   Hand-written trie for KEYWORD matching
+│       └── injection.py      Weighted prompt-injection rule scanner
+├── ui/
+│   └── streamlit_app.py      Review-and-send UI and audit dashboard (HTML-escaped)
+├── policies/
+│   └── policy.yaml           Per-profile actions (student, developer)
+├── tests/                    pytest suite plus eval.py and the three synthetic datasets
+├── benchmarks/               Eval results (JSON/CSV), trie benchmark script and chart
+├── data/
+│   └── audit.db              SQLite audit database (created at runtime)
+├── .env.example              Template of key/settings names (real keys go in .env, never committed)
+├── AGENTS.md                 Project rules for AI contributors
+└── LICENSE                   MIT license
+```
+
+## Team
+
+| Name | Role |
+|---|---|
+| <name> | Backend / pipeline |
+| <name> | Detectors / algorithms |
+| <name> | UI / integration |
+| <name> | Evaluation / benchmarks |
+
+## References
+
+- OWASP Top 10 for LLM Applications —
+  [LLM01: Prompt Injection](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
+  and
+  [LLM02: Sensitive Information Disclosure](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
+- [Microsoft Presidio](https://microsoft.github.io/presidio/) —
+  suggested NER-based PII detector for future work
+- Python docs —
+  [`re`](https://docs.python.org/3/library/re.html) and
+  [`sqlite3`](https://docs.python.org/3/library/sqlite3.html)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
